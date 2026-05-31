@@ -76,12 +76,14 @@ python fluxcam.py --selftest      # headless: render synthetic motion to PNGs (n
 | `c` | particle colour (direction / camera / ember) | `-` `=` | shorter / longer trails |
 | `x` | toggle faint camera "ghost" | `f` | mirror |
 | `g` | toggle hand control | `r` | clear the trail |
-| `space` | pause | `s` | save a PNG |
-| `h` | toggle help | `q`/`Esc` | quit |
+| `e` | clear the echoes | `s` | save a PNG |
+| `space` | pause | `h` | toggle help · `q`/`Esc` quit |
 
-**Hand gestures** (when hand control is on): **pinch** thumb to index to grab particles and fling
-them where your hand moves (a green ring marks the grab point); show an **open palm** to push them
-away (blue ring). A relaxed/closed hand does nothing, so the gestures stay intentional.
+**Hand gestures** (when hand control is on): **pinch** thumb to index to *freeze a translucent
+echo* of yourself onto the scene — pinch again in a new pose and the ghosts stack into a live
+multi-exposure (a green ring marks the pinch, a counter shows how many echoes; `e` clears them).
+Pinching also grabs and flings nearby particles, and an **open palm** pushes them away (blue ring).
+A relaxed/closed hand does nothing, so the gestures stay intentional.
 
 ## Design notes & honest trade-offs
 

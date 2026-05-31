@@ -15,8 +15,9 @@ Why it looks alive (the three ideas doing the work):
   3. A fading trail buffer (each frame dimmed, new splats added) gives the glowing,
      long-exposure look instead of flickering dots.
 
-Reach in and touch it: with MediaPipe hand tracking (on by default), pinch your fingers
-to *grab* the particles and fling them, or hold up an open palm to *push* them away.
+Reach in and touch it: with MediaPipe hand tracking (on by default), pinch your fingers to
+freeze a *translucent echo* of yourself onto the scene — pinch again in a new pose and the
+ghosts stack into a multi-exposure. An open palm pushes the particles away.
 
 All vectorized in NumPy + OpenCV — no per-particle Python loop — so it runs in real time.
 
@@ -30,7 +31,7 @@ Run it:
 Keys (window focused):
     q/Esc quit   space pause   m mode   c particle colour   x camera ghost
     [ ] fewer/more particles   - = shorter/longer trails    f mirror
-    g hand control   r reset   s save PNG   h help
+    g hand control   e clear echoes   r reset   s save PNG   h help
 """
 from __future__ import annotations
 
@@ -253,7 +254,7 @@ def compose(trail: np.ndarray, cfg: Cfg, small_bgr: np.ndarray, out_size) -> np.
     disp = np.clip(trail, 0, 255).astype(np.uint8)
     if cfg.ghost:
         ghost = cv2.resize(small_bgr, out_size, interpolation=cv2.INTER_LINEAR)
-        disp = cv2.addWeighted(disp, 1.0, ghost, 0.12, 0)
+        disp = cv2.addWeighted(disp, 1.0, ghost, 0.18, 0)
     return disp
 
 
@@ -350,9 +351,11 @@ def overlay(img, cfg: Cfg, fps: float):
     cv2.putText(img, s, (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4, cv2.LINE_AA)
     cv2.putText(img, s, (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
     if cfg.show_help:
-        for i, line in enumerate(["m mode  c colour  x ghost  f mirror  g hands  space pause",
-                                  "[ ] particles   - = trails   r reset  s save  q quit"]):
-            y = img.shape[0] - 16 - (1 - i) * 22
+        lines = ["m mode  c colour  x ghost  f mirror  g hands  space pause",
+                 "[ ] particles   - = trails   r reset   s save   e clear echoes   q quit",
+                 "hands: pinch = freeze a translucent echo of you · open palm = push particles"]
+        for i, line in enumerate(lines):
+            y = img.shape[0] - 16 - (len(lines) - 1 - i) * 22
             cv2.putText(img, line, (12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 0, 0), 4, cv2.LINE_AA)
             cv2.putText(img, line, (12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (160, 220, 255), 1, cv2.LINE_AA)
 
@@ -395,6 +398,33 @@ def save_png(img) -> str:
 
 
 # --------------------------------------------------------------------------------------
+# Echo layer — each pinch "freezes" the current frame as a translucent ghost. New stamps
+# are lighten-blended (np.maximum) over the existing ghosts with a gentle fade, so many
+# pinches stack into a multi-exposure of frozen translucent selves without blowing out.
+# --------------------------------------------------------------------------------------
+class EchoLayer:
+    def __init__(self, out_w: int, out_h: int, fade: float = 0.90):
+        self.out_size = (out_w, out_h)
+        self.fade = fade
+        self.buf: np.ndarray | None = None     # float32 accumulator, or None if empty
+        self.count = 0
+
+    def stamp(self, frame_bgr: np.ndarray):
+        s = cv2.resize(frame_bgr, self.out_size, interpolation=cv2.INTER_LINEAR).astype(np.float32)
+        self.buf = s if self.buf is None else np.maximum(self.buf * self.fade, s)
+        self.count += 1
+
+    def clear(self):
+        self.buf, self.count = None, 0
+
+    def overlay(self, img: np.ndarray, alpha: float = 0.55) -> np.ndarray:
+        if self.buf is None:
+            return img
+        ghost = np.clip(self.buf, 0, 255).astype(np.uint8)
+        return cv2.addWeighted(img, 1.0, ghost, alpha, 0)
+
+
+# --------------------------------------------------------------------------------------
 # Entry points
 # --------------------------------------------------------------------------------------
 def run_live(src: str, cfg: Cfg, out_w: int, out_h: int, hand_model: str) -> int:
@@ -409,17 +439,20 @@ def run_live(src: str, cfg: Cfg, out_w: int, out_h: int, hand_model: str) -> int
     if cfg.hands:
         try:
             tracker = HandTracker(hand_model)
-            print("hand control ON — pinch to grab/fling, open palm to push (g toggles).")
+            print("hand control ON — pinch = freeze a translucent echo of you,"
+                  " open palm = push, e = clear echoes (g toggles).")
         except Exception as e:                       # missing mediapipe or model file
             print(f"hand control unavailable ({type(e).__name__}: {e}); running without it.",
                   file=sys.stderr)
             cfg.hands = False
 
     eng = Engine(cfg, out_w, out_h)
+    echoes = EchoLayer(out_w, out_h)
     win = "FluxCam — paint with motion (h = help)"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     last, hands = None, []
     fps, t = 0.0, time.time()
+    prev_pinch, flash_until = False, 0.0
     print("FluxCam running — move around! Focus the window, press h for keys, q to quit.")
     while True:
         if not cfg.paused:
@@ -437,15 +470,30 @@ def run_live(src: str, cfg: Cfg, out_w: int, out_h: int, hand_model: str) -> int
             inst = 1.0 / max(1e-6, now - t)
             fps = 0.9 * fps + 0.1 * inst if fps else inst
             t = now
+            # stamp a translucent echo on the rising edge of each pinch (one per pinch)
+            pinch = any(h["act"] == "grab" for h in hands)
+            if pinch and not prev_pinch:
+                echoes.stamp(frame)
+                flash_until = now + 0.18
+            prev_pinch = pinch
         if last is not None:
-            shown = last.copy()
+            shown = echoes.overlay(last.copy())
             if cfg.hands:
                 draw_hands(shown, hands)
+            if time.time() < flash_until:                # quick flash confirms a capture
+                shown = cv2.addWeighted(shown, 0.4, np.full_like(shown, 255), 0.6, 0)
             overlay(shown, cfg, fps)
+            if echoes.count:
+                cv2.putText(shown, f"echoes: {echoes.count}", (shown.shape[1] - 160, 28),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4, cv2.LINE_AA)
+                cv2.putText(shown, f"echoes: {echoes.count}", (shown.shape[1] - 160, 28),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (120, 255, 120), 1, cv2.LINE_AA)
             cv2.imshow(win, shown)
         k = cv2.waitKey(1) & 0xFF
         if k == ord("s") and last is not None:
-            save_png(last)
+            save_png(echoes.overlay(last.copy()))
+        elif k == ord("e"):
+            echoes.clear()
         elif k != 255 and not handle_key(k, cfg, eng):
             break
     if tracker is not None:
