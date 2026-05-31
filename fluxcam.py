@@ -15,22 +15,27 @@ Why it looks alive (the three ideas doing the work):
   3. A fading trail buffer (each frame dimmed, new splats added) gives the glowing,
      long-exposure look instead of flickering dots.
 
+Reach in and touch it: with MediaPipe hand tracking (on by default), pinch your fingers
+to *grab* the particles and fling them, or hold up an open palm to *push* them away.
+
 All vectorized in NumPy + OpenCV — no per-particle Python loop — so it runs in real time.
 
 Run it:
-    python fluxcam.py                 # webcam, particle mode
+    python fluxcam.py                 # webcam, particle mode (+ hand control)
     python fluxcam.py --mode flow     # start in dense-flow rainbow mode
     python fluxcam.py --input clip.mp4
+    python fluxcam.py --no-hands      # disable hand tracking
     python fluxcam.py --selftest      # headless: render synthetic motion to PNGs
 
 Keys (window focused):
     q/Esc quit   space pause   m mode   c particle colour   x camera ghost
     [ ] fewer/more particles   - = shorter/longer trails    f mirror
-    r reset      s save PNG    h help
+    g hand control   r reset   s save PNG   h help
 """
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from dataclasses import dataclass
@@ -41,6 +46,9 @@ import numpy as np
 
 MODES = ["particles", "flow", "ink"]
 PARTICLE_COLORS = ["direction", "camera", "ember"]
+
+DEFAULT_HAND_MODEL = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "models", "hand_landmarker.task")
 
 
 # --------------------------------------------------------------------------------------
@@ -95,6 +103,87 @@ class Particles:
 
 
 # --------------------------------------------------------------------------------------
+# Hand control — MediaPipe Tasks HandLandmarker boiled down to per-hand "action points".
+# Pinch (thumb-index tips together) = grab/fling, open palm = push. mediapipe is an
+# optional dependency; if it (or the model) is missing, FluxCam still runs without hands.
+# --------------------------------------------------------------------------------------
+class HandTracker:
+    TIPS = [8, 12, 16, 20]                       # index/middle/ring/pinky finger tips
+
+    def __init__(self, model_path: str, max_hands: int = 2):
+        import mediapipe as mp
+        from mediapipe.tasks import python as mp_python
+        from mediapipe.tasks.python import vision as mp_vision
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(model_path)
+        self.mp = mp
+        opts = mp_vision.HandLandmarkerOptions(
+            base_options=mp_python.BaseOptions(model_asset_path=model_path),
+            running_mode=mp_vision.RunningMode.VIDEO,
+            num_hands=max_hands,
+            min_hand_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+        self.landmarker = mp_vision.HandLandmarker.create_from_options(opts)
+        self.prev: dict[str, tuple[float, float]] = {}   # handedness label -> last pinch xy
+        self.t0 = time.time()
+        self._last_ts = -1
+
+    def process(self, frame_bgr: np.ndarray) -> list[dict]:
+        """Return a list of hands as dicts: pos (normalized xy), vel, act, amt."""
+        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        image = self.mp.Image(image_format=self.mp.ImageFormat.SRGB, data=rgb)
+        ts = max(self._last_ts + 1, int((time.time() - self.t0) * 1000))  # must increase
+        self._last_ts = ts
+        res = self.landmarker.detect_for_video(image, ts)
+
+        hands = []
+        for i, lms in enumerate(res.hand_landmarks):
+            label = (res.handedness[i][0].category_name
+                     if i < len(res.handedness) else str(i))
+            P = np.array([[p.x, p.y] for p in lms], np.float32)
+            wrist, mmcp = P[0], P[9]
+            scale = float(np.linalg.norm(wrist - mmcp)) + 1e-6
+            pinch_d = float(np.linalg.norm(P[4] - P[8])) / scale
+            pinch_amt = float(np.clip(1 - (pinch_d - 0.20) / 0.70, 0, 1))
+            spread = float(np.mean(np.linalg.norm(P[self.TIPS] - wrist, axis=1))) / scale
+            openness = float(np.clip((spread - 1.10) / 0.90, 0, 1))
+
+            px, py = ((P[4] + P[8]) / 2.0).tolist()        # pinch midpoint
+            prev = self.prev.get(label, (px, py))
+            vel = (px - prev[0], py - prev[1])
+            self.prev[label] = (px, py)
+
+            if pinch_amt > 0.6:
+                act, amt = "grab", pinch_amt
+            elif openness > 0.5:
+                act, amt = "push", openness
+            else:
+                act, amt = "idle", 0.0
+            hands.append({"pos": (px, py), "vel": vel, "act": act, "amt": amt})
+        return hands
+
+    def close(self):
+        try:
+            self.landmarker.close()
+        except Exception:
+            pass
+
+
+def draw_hands(img: np.ndarray, hands: list[dict]):
+    """Feedback markers: green ring = grab, blue ring = push."""
+    H, W = img.shape[:2]
+    for h in hands:
+        if h["act"] == "idle":
+            continue
+        x, y = int(h["pos"][0] * W), int(h["pos"][1] * H)
+        color = (120, 255, 120) if h["act"] == "grab" else (255, 180, 80)
+        r = int(18 + 34 * h["amt"])
+        cv2.circle(img, (x, y), r, color, 2, cv2.LINE_AA)
+        cv2.circle(img, (x, y), 3, color, -1, cv2.LINE_AA)
+
+
+# --------------------------------------------------------------------------------------
 # App state
 # --------------------------------------------------------------------------------------
 @dataclass
@@ -107,6 +196,7 @@ class Cfg:
     ghost: bool = True           # faint camera image under the particles
     paused: bool = False
     show_help: bool = True
+    hands: bool = True           # MediaPipe hand control (pinch grab / palm push)
 
 
 FLOW_W = 320                     # optical flow is computed at this width (fast); scaled up
@@ -186,7 +276,37 @@ class Engine:
             self.flow_h = int(self.flow_w * fh / fw)
             self.particles = Particles(self.cfg.n, self.flow_w, self.flow_h, self.rng)
 
-    def step(self, frame_bgr: np.ndarray, dt: float = 1 / 30) -> np.ndarray:
+    def apply_hands(self, hands: list[dict] | None):
+        """Push particle positions around in flow-space from hand gestures.
+
+        Returns the per-particle displacement (the 'kick') so callers can fold it into
+        the colour velocity — grabbed/flung particles then light up and take their hue
+        from the direction the hand threw them.
+        """
+        p = self.particles
+        if not hands or p is None:
+            return None
+        fw, fh = self.flow_w, self.flow_h
+        R = 0.42 * fw                                # influence radius in flow pixels
+        kick = np.zeros_like(p.pos)
+        for h in hands:
+            act = h["act"]
+            if act == "idle":
+                continue
+            cx, cy = h["pos"][0] * fw, h["pos"][1] * fh
+            d = p.pos - np.array([cx, cy], np.float32)        # centre -> particle
+            dist = np.sqrt((d * d).sum(1)) + 1e-3
+            falloff = np.clip(1 - dist / R, 0, 1)[:, None]    # 1 at centre, 0 at edge
+            if act == "grab":
+                hv = np.array([h["vel"][0] * fw, h["vel"][1] * fh], np.float32)
+                kick += -d * (0.20 * falloff) + hv[None, :] * (1.1 * falloff)
+            else:                                             # push
+                kick += (d / dist[:, None]) * (4.0 * falloff)
+        p.pos += kick
+        return kick
+
+    def step(self, frame_bgr: np.ndarray, dt: float = 1 / 30,
+             hands: list[dict] | None = None) -> np.ndarray:
         fh, fw = frame_bgr.shape[:2]
         self._ensure(fh, fw)
         small = cv2.resize(frame_bgr, (self.flow_w, self.flow_h), interpolation=cv2.INTER_AREA)
@@ -208,6 +328,9 @@ class Engine:
         # particle + ink modes both advect particles into the fading trail buffer
         self.particles.resize(cfg.n)
         vel = self.particles.update(flow, speed=2.2, dt=dt)
+        kick = self.apply_hands(hands)
+        if kick is not None:
+            vel = vel + kick * 5.0            # grabbed/flung particles glow + take hand's hue
         colors = colors_for(cfg, vel, self.particles.pos, small)
 
         self.trail *= cfg.decay
@@ -227,7 +350,7 @@ def overlay(img, cfg: Cfg, fps: float):
     cv2.putText(img, s, (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4, cv2.LINE_AA)
     cv2.putText(img, s, (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
     if cfg.show_help:
-        for i, line in enumerate(["m mode  c colour  x ghost  f mirror  space pause",
+        for i, line in enumerate(["m mode  c colour  x ghost  f mirror  g hands  space pause",
                                   "[ ] particles   - = trails   r reset  s save  q quit"]):
             y = img.shape[0] - 16 - (1 - i) * 22
             cv2.putText(img, line, (12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 0, 0), 4, cv2.LINE_AA)
@@ -249,6 +372,8 @@ def handle_key(k: int, cfg: Cfg, eng: "Engine") -> bool:
         cfg.mirror = not cfg.mirror
     elif k == ord("h"):
         cfg.show_help = not cfg.show_help
+    elif k == ord("g"):
+        cfg.hands = not cfg.hands
     elif k == ord("["):
         cfg.n = max(500, cfg.n - 1000)
     elif k == ord("]"):
@@ -272,7 +397,7 @@ def save_png(img) -> str:
 # --------------------------------------------------------------------------------------
 # Entry points
 # --------------------------------------------------------------------------------------
-def run_live(src: str, cfg: Cfg, out_w: int, out_h: int) -> int:
+def run_live(src: str, cfg: Cfg, out_w: int, out_h: int, hand_model: str) -> int:
     cap = cv2.VideoCapture(int(src) if src.isdigit() else src)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
@@ -280,10 +405,20 @@ def run_live(src: str, cfg: Cfg, out_w: int, out_h: int) -> int:
         print("could not open camera/video. Try --input <index|file> or --selftest.", file=sys.stderr)
         return 1
 
+    tracker = None
+    if cfg.hands:
+        try:
+            tracker = HandTracker(hand_model)
+            print("hand control ON — pinch to grab/fling, open palm to push (g toggles).")
+        except Exception as e:                       # missing mediapipe or model file
+            print(f"hand control unavailable ({type(e).__name__}: {e}); running without it.",
+                  file=sys.stderr)
+            cfg.hands = False
+
     eng = Engine(cfg, out_w, out_h)
     win = "FluxCam — paint with motion (h = help)"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
-    last = None
+    last, hands = None, []
     fps, t = 0.0, time.time()
     print("FluxCam running — move around! Focus the window, press h for keys, q to quit.")
     while True:
@@ -296,13 +431,16 @@ def run_live(src: str, cfg: Cfg, out_w: int, out_h: int) -> int:
                 continue
             if cfg.mirror:
                 frame = cv2.flip(frame, 1)
+            hands = tracker.process(frame) if (tracker is not None and cfg.hands) else []
             now = time.time()
-            last = eng.step(frame, dt=max(1e-3, now - t))
+            last = eng.step(frame, dt=max(1e-3, now - t), hands=hands)
             inst = 1.0 / max(1e-6, now - t)
             fps = 0.9 * fps + 0.1 * inst if fps else inst
             t = now
         if last is not None:
             shown = last.copy()
+            if cfg.hands:
+                draw_hands(shown, hands)
             overlay(shown, cfg, fps)
             cv2.imshow(win, shown)
         k = cv2.waitKey(1) & 0xFF
@@ -310,6 +448,8 @@ def run_live(src: str, cfg: Cfg, out_w: int, out_h: int) -> int:
             save_png(last)
         elif k != 255 and not handle_key(k, cfg, eng):
             break
+    if tracker is not None:
+        tracker.close()
     cap.release()
     cv2.destroyAllWindows()
     return 0
@@ -350,13 +490,17 @@ def main(argv=None) -> int:
     p.add_argument("--width", type=int, default=960, help="output window width")
     p.add_argument("--height", type=int, default=540, help="output window height")
     p.add_argument("--no-mirror", action="store_true")
+    p.add_argument("--no-hands", action="store_true", help="disable MediaPipe hand control")
+    p.add_argument("--hand-model", default=DEFAULT_HAND_MODEL,
+                   help="path to MediaPipe hand_landmarker.task")
     p.add_argument("--selftest", action="store_true", help="run headless, write PNGs, exit")
     args = p.parse_args(argv)
 
-    cfg = Cfg(n=args.particles, mode=MODES.index(args.mode), mirror=not args.no_mirror)
+    cfg = Cfg(n=args.particles, mode=MODES.index(args.mode), mirror=not args.no_mirror,
+              hands=not args.no_hands)
     if args.selftest:
         return run_selftest(cfg, args.width, args.height)
-    return run_live(args.input, cfg, args.width, args.height)
+    return run_live(args.input, cfg, args.width, args.height, args.hand_model)
 
 
 if __name__ == "__main__":

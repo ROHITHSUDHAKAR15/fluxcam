@@ -4,14 +4,17 @@ Point your webcam at yourself and **move**. Thousands of glowing particles get s
 your movement, leaving neon trails that fade like a long exposure. Nothing is scripted — every
 frame the program measures how the picture is *flowing* and pushes the particles with it.
 
-It's a real-time, interactive piece of generative art in ~300 lines of Python.
+Then **reach in and touch it**: pinch your fingers to *grab and fling* the particles, or hold up
+an open palm to *push* them away — live hand tracking, no controller.
+
+It's a real-time, interactive piece of generative art in ~400 lines of Python.
 
 ![three modes](docs/modes.png)
 <!-- run `python fluxcam.py --selftest` to regenerate sample frames -->
 
 ---
 
-## How it works (the three ideas doing the work)
+## How it works (the four ideas doing the work)
 
 1. **Dense optical flow** — `cv2.calcOpticalFlowFarneback` compares two consecutive frames and
    returns, for *every pixel*, how far and which way it moved. That velocity field **is** your
@@ -21,15 +24,22 @@ It's a real-time, interactive piece of generative art in ~300 lines of Python.
    **direction** they travel (angle → hue), so a wave of your hand paints an arc of rainbow.
 3. **A fading trail buffer** — each frame the canvas is dimmed by a decay factor and new particle
    splats are added on top. That's what turns flickering dots into smooth glowing trails.
+4. **Hand control** — MediaPipe's `HandLandmarker` returns 21 landmarks per hand. From them we read
+   two gestures: thumb–index distance (a **pinch**) and finger spread (an **open palm**). A pinch
+   becomes an attractor that grabs nearby particles and flings them in the direction your hand is
+   moving; an open palm becomes a repeller that shoves them away. The forces are applied as a single
+   vectorized displacement over all particles — same no-Python-loop discipline as the rest.
 
 The whole thing is **vectorized in NumPy + OpenCV** — no per-particle Python loop. Optical flow is
 computed at a small 320-px width and the particles are splatted with `np.add.at`, so it comfortably
-hits real-time framerates on a laptop CPU. No GPU, no ML model download.
+hits real-time framerates on a laptop CPU — no GPU. The only model is MediaPipe's small
+hand-landmark `.task` (≈7 MB, bundled); hand control is optional (`--no-hands`).
 
 ```
 webcam ─► resize 320px ─► Farneback flow ─┬─► advect particles ─► colour by direction
-                                          │                          │
-                          fade trail ◄────┘      additive splat ◄────┘  ─► glow ─► window
+   │                                      │                          │
+   └─► MediaPipe hands ─► grab / push ────┤        additive splat ◄──┤
+                          fade trail ◄────┘                          └─► glow ─► window
 ```
 
 ## Modes (cycle with `m`)
@@ -46,9 +56,10 @@ webcam ─► resize 320px ─► Farneback flow ─┬─► advect particles �
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-python fluxcam.py                 # webcam, particle mode — move around!
+python fluxcam.py                 # webcam, particle mode + hand control — move around!
 python fluxcam.py --mode flow     # start in dense-flow rainbow mode
 python fluxcam.py --input clip.mp4 --particles 12000
+python fluxcam.py --no-hands      # skip MediaPipe (lighter, optical flow only)
 python fluxcam.py --selftest      # headless: render synthetic motion to PNGs (no camera/GUI)
 ```
 
@@ -62,8 +73,13 @@ python fluxcam.py --selftest      # headless: render synthetic motion to PNGs (n
 | `m` | cycle mode | `[` `]` | fewer / more particles |
 | `c` | particle colour (direction / camera / ember) | `-` `=` | shorter / longer trails |
 | `x` | toggle faint camera "ghost" | `f` | mirror |
-| `space` | pause | `r` | clear the trail |
-| `s` | save a PNG | `h` | toggle help · `q`/`Esc` quit |
+| `g` | toggle hand control | `r` | clear the trail |
+| `space` | pause | `s` | save a PNG |
+| `h` | toggle help | `q`/`Esc` | quit |
+
+**Hand gestures** (when hand control is on): **pinch** thumb to index to grab particles and fling
+them where your hand moves (a green ring marks the grab point); show an **open palm** to push them
+away (blue ring). A relaxed/closed hand does nothing, so the gestures stay intentional.
 
 ## Design notes & honest trade-offs
 
@@ -77,15 +93,18 @@ python fluxcam.py --selftest      # headless: render synthetic motion to PNGs (n
   moves (nothing to track) while a patterned shirt lights up. That's expected, and part of the charm.
 - **Direction-coloured particles** make motion *legible*: you can see at a glance which way each part
   of the scene is moving. Switch to `camera` colour to paint with your actual colours instead.
+- **Gestures, not classification.** Hand control reads two cheap geometric features from the
+  landmarks (thumb–index distance, finger spread) rather than a gesture classifier. It's robust,
+  has zero training, and the thresholds are easy to reason about — but it only knows *pinch* and
+  *open palm*, by design.
 
 ## Possible extensions
-GPU splatting (moderngl) for millions of particles · MediaPipe hand tracking to *grab*/repel
-particles with a pinch · audio-reactive brightness · record to video (`cv2.VideoWriter`) ·
-attractors/repellers you place with the mouse.
+GPU splatting (moderngl) for millions of particles · two-handed pinch to stretch/rotate the field ·
+audio-reactive brightness · record to video (`cv2.VideoWriter`) · attractors you place with the mouse.
 
 ---
 
-**Stack:** Python 3 · OpenCV · NumPy
+**Stack:** Python 3 · OpenCV · NumPy · MediaPipe
 
 ### Credits / inspiration
 Built after studying common OpenCV optical-flow and webcam creative-coding patterns:
@@ -93,3 +112,4 @@ Built after studying common OpenCV optical-flow and webcam creative-coding patte
 - [LearnOpenCV — Optical Flow](https://learnopencv.com/optical-flow-in-opencv/)
 - [daisukelab/cv_opt_flow](https://github.com/daisukelab/cv_opt_flow) (dense-flow HSV showcase)
 - [RomalaMishra/Air_Canvas](https://github.com/RomalaMishra/Air_Canvas) (webcam interactive-art pattern)
+- [MediaPipe Hand Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/hand_landmarker) (21-point hand tracking)
