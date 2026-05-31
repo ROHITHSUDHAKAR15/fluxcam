@@ -12,6 +12,8 @@ It's a real-time, interactive piece of generative art in ~400 lines of Python.
 ![three modes](docs/modes.png)
 <!-- run `python fluxcam.py --selftest` to regenerate sample frames -->
 
+**Docs:** [Setup & troubleshooting](docs/SETUP.md) · [How it works (concepts)](docs/CONCEPTS.md) · [Interview / presentation guide](docs/INTERVIEW.md)
+
 ---
 
 ## How it works (the four ideas doing the work)
