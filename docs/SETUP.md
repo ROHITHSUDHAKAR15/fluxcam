@@ -12,7 +12,7 @@ running window is about two minutes.
 | **Python** | 3.9 – 3.12 (MediaPipe wheels exist for these; 3.13 may not have one yet) |
 | **OS** | macOS, Linux, or Windows |
 | **Hardware** | Any laptop CPU. No GPU required. A webcam for live mode (not needed for `--selftest`). |
-| **Disk** | ~250 MB for the virtualenv (MediaPipe + OpenCV + their deps), plus the 7.8 MB hand model already in the repo. |
+| **Disk** | ~250 MB for the virtualenv (MediaPipe + OpenCV + their deps), plus the bundled MediaPipe models (face ~3.8 MB, hand ~7.8 MB) already in the repo. |
 
 ---
 
@@ -36,7 +36,8 @@ numpy>=1.24
 mediapipe>=0.10        # hand control; optional — run --no-hands to skip
 ```
 
-The hand-tracking model (`models/hand_landmarker.task`, ~7.8 MB) is committed to the repo,
+Both MediaPipe models — `models/face_landmarker.task` (~3.8 MB, the AR filters) and
+`models/hand_landmarker.task` (~7.8 MB, the particle grab/push) — are committed to the repo,
 so there is **nothing else to download**.
 
 ---
@@ -44,14 +45,16 @@ so there is **nothing else to download**.
 ## 3. Run
 
 ```bash
-python fluxcam.py                 # webcam, particle mode + hand control
+python fluxcam.py                 # clean camera + AR face filter (press n to swap)
+python fluxcam.py --filter dog    # start on a specific filter
 python fluxcam.py --mode flow     # dense-flow rainbow mode
-python fluxcam.py --no-hands      # lighter: optical flow only, no MediaPipe
+python fluxcam.py --no-hands      # lighter: no MediaPipe (no filters, no hand control)
 python fluxcam.py --input clip.mp4 --particles 12000
 python fluxcam.py --selftest      # headless smoke test → writes PNGs, no camera/GUI
 ```
 
-Focus the window and press **`h`** for the on-screen key list.
+Focus the window and press **`h`** for the on-screen key list. Press **`n`** to swap face
+filters, **`m`** to switch into the motion-art modes.
 
 ---
 
@@ -84,11 +87,13 @@ particles actually responded to motion and got splatted onto the canvas.
 | Flag | Default | Meaning |
 |---|---|---|
 | `--input` | `0` | Camera index (`0`, `1`, …) or a path to a video file. |
-| `--mode` | `particles` | Start mode: `particles`, `flow`, or `ink`. |
+| `--mode` | `photo` | Start mode: `photo`, `particles`, `flow`, or `ink`. |
+| `--filter` | `sunglasses` | Starting AR face filter: `none`, `sunglasses`, `mustache`, `dog`, `crown`, `clown` (cycle live with `n`). |
 | `--particles` | `6000` | Particle count (live-tunable with `[` `]`, 500–40000). |
 | `--width` / `--height` | `960` / `540` | Output window size in pixels. |
 | `--no-mirror` | off | Don't horizontally flip the camera (default mirrors, like a selfie). |
-| `--no-hands` | off | Disable MediaPipe hand control entirely. |
+| `--no-hands` | off | Disable MediaPipe entirely (no face filters, no hand control). |
+| `--face-model` | `models/face_landmarker.task` | Path to an alternate face-landmark model. |
 | `--hand-model` | `models/hand_landmarker.task` | Path to an alternate hand-landmark model. |
 | `--selftest` | off | Run headless, write PNGs, exit. |
 
@@ -126,6 +131,16 @@ Newer MediaPipe builds ship **only** the Tasks API, not the legacy `mp.solutions
 FluxCam already uses the Tasks API (`HandLandmarker`), so this is expected — there's nothing
 to fix. If your own code needs `solutions`, pin an older MediaPipe (`mediapipe==0.10.9`).
 
+### Face filter "isn't showing up"
+- It only appears in **photo** mode (the default). If you pressed `m`, you're in an art mode —
+  press `m` until the status line reads `photo`, or just restart.
+- Get your **whole face** in frame and reasonably well lit; MediaPipe needs to detect the face
+  before any prop is drawn.
+- Press **`n`** to make sure you're not on the `none` filter (the status line shows the current
+  filter name).
+- The startup log prints whether face tracking loaded. If it says it's unavailable, MediaPipe or
+  `models/face_landmarker.task` is missing — reinstall (`pip install -r requirements.txt`).
+
 ### Hand control "isn't doing anything"
 - Make sure your **whole hand** is in frame and reasonably well lit.
 - The gestures are deliberate: a *pinch* (thumb tip touching index tip) grabs; a flat *open
@@ -153,9 +168,10 @@ or stand in front of something with a bit of pattern. This is expected behaviour
 
 ```
 fluxcam/
-├── fluxcam.py                    # the whole app (~400 lines)
+├── fluxcam.py                    # the whole app (~500 lines)
 ├── requirements.txt
 ├── models/
+│   ├── face_landmarker.task      # MediaPipe face mesh — AR filters (bundled, ~3.8 MB)
 │   └── hand_landmarker.task      # MediaPipe hand model (bundled, ~7.8 MB)
 ├── docs/
 │   ├── modes.png                 # montage of the three modes

@@ -1,13 +1,16 @@
-# 🌈 FluxCam — paint with motion
+# 🌈 FluxCam — AR face filters + motion art
 
-Point your webcam at yourself and **move**. Thousands of glowing particles get swept along by
-your movement, leaving neon trails that fade like a long exposure. Nothing is scripted — every
-frame the program measures how the picture is *flowing* and pushes the particles with it.
+Point your webcam at yourself. By default you get a clean, sharp camera with a **Snapchat-style
+AR face filter** locked onto your face — sunglasses, a mustache, dog ears, a crown, a clown nose
+— tracked live with MediaPipe's 468-point face mesh. Press **`n`** to swap filters; they rotate,
+scale, and follow your head in real time.
 
-Then **reach in and touch it**: pinch your fingers to *grab and fling* the particles, or hold up
-an open palm to *push* them away — live hand tracking, no controller.
+Press **`m`** and the same webcam turns into **generative motion art**: the program measures how
+the picture is *flowing* every frame and sweeps thousands of glowing particles along with your
+movement, leaving neon trails. **Reach in and touch it** — pinch to *grab and fling* the
+particles, open palm to *push* them away. Live hand tracking, no controller.
 
-It's a real-time, interactive piece of generative art in ~400 lines of Python.
+It's a real-time, interactive computer-vision toy in ~500 lines of Python.
 
 ![three modes](docs/modes.png)
 <!-- run `python fluxcam.py --selftest` to regenerate sample frames -->
@@ -16,17 +19,23 @@ It's a real-time, interactive piece of generative art in ~400 lines of Python.
 
 ---
 
-## How it works (the four ideas doing the work)
+## How it works (the ideas doing the work)
 
-1. **Dense optical flow** — `cv2.calcOpticalFlowFarneback` compares two consecutive frames and
+1. **AR face filters** — MediaPipe's `FaceLandmarker` returns **468 face landmarks** per frame. We
+   derive a small *face frame* from a couple of them (centre between the eyes, scale = eye-corner
+   distance, roll = angle of the eye line) and draw props anchored to it — sunglasses over the eyes,
+   a mustache under the nose, ears above the forehead. Because everything is positioned in that
+   frame, the props **track head tilt, distance, and movement** automatically. The props are plain
+   OpenCV shapes (no image assets), so the repo stays tiny and there's nothing to download.
+2. **Dense optical flow** — `cv2.calcOpticalFlowFarneback` compares two consecutive frames and
    returns, for *every pixel*, how far and which way it moved. That velocity field **is** your
    motion, captured as data.
-2. **A particle system rides the flow** — ~6,000 particles sample the field at their position and
+3. **A particle system rides the flow** — ~6,000 particles sample the field at their position and
    get advected along it, so they literally stream with your hand/body. They're coloured by the
    **direction** they travel (angle → hue), so a wave of your hand paints an arc of rainbow.
-3. **A fading trail buffer** — each frame the canvas is dimmed by a decay factor and new particle
+4. **A fading trail buffer** — each frame the canvas is dimmed by a decay factor and new particle
    splats are added on top. That's what turns flickering dots into smooth glowing trails.
-4. **Hand control** — MediaPipe's `HandLandmarker` returns 21 landmarks per hand. From them we read
+5. **Hand control** — MediaPipe's `HandLandmarker` returns 21 landmarks per hand. From them we read
    two gestures: thumb–index distance (a **pinch**) and finger spread (an **open palm**). A pinch
    becomes an attractor that grabs nearby particles and flings them in the direction your hand is
    moving; an open palm becomes a repeller that shoves them away. The forces are applied as a single
@@ -34,8 +43,8 @@ It's a real-time, interactive piece of generative art in ~400 lines of Python.
 
 The whole thing is **vectorized in NumPy + OpenCV** — no per-particle Python loop. Optical flow is
 computed at a small 320-px width and the particles are splatted with `np.add.at`, so it comfortably
-hits real-time framerates on a laptop CPU — no GPU. The only model is MediaPipe's small
-hand-landmark `.task` (≈7 MB, bundled); hand control is optional (`--no-hands`).
+hits real-time framerates on a laptop CPU — no GPU. The two MediaPipe models (face ≈3.8 MB, hand
+≈7.8 MB) are small and bundled; all MediaPipe tracking is optional (`--no-hands`).
 
 ```
 webcam ─► resize 320px ─► Farneback flow ─┬─► advect particles ─► colour by direction
@@ -48,8 +57,8 @@ webcam ─► resize 320px ─► Farneback flow ─┬─► advect particles �
 
 | Mode | What you see |
 |---|---|
-| **photo** *(default)* | A clean, clear live camera. **Pinch** to freeze a translucent echo of yourself; pinch again to stack more into a live multi-exposure. No particles, no clutter. |
-| **particles** | Glowing particles swept by your motion, trailing light. The signature art look. |
+| **photo** *(default)* | A clean, clear live camera with an **AR face filter** locked onto your face. Press **`n`** to cycle: sunglasses · mustache · dog ears · crown · clown nose · none. |
+| **particles** | Glowing particles swept by your motion, trailing light. The signature art look. **Pinch** to grab/fling, open palm to push. |
 | **flow** | The raw motion field as colour — direction → hue, speed → brightness. Your movement *is* the rainbow. |
 | **ink** | Like particles, but the trail is blurred each frame so colour bleeds and diffuses like dye in water. |
 
@@ -59,12 +68,13 @@ webcam ─► resize 320px ─► Farneback flow ─┬─► advect particles �
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-python fluxcam.py                   # clean camera — pinch to stack translucent echoes
-python fluxcam.py --mode particles  # the glowing motion-particle art
-python fluxcam.py --mode flow       # dense-flow rainbow mode
+python fluxcam.py                     # clean camera + AR face filter (press n to swap)
+python fluxcam.py --filter dog        # start on a specific filter
+python fluxcam.py --mode particles    # the glowing motion-particle art
+python fluxcam.py --mode flow         # dense-flow rainbow mode
 python fluxcam.py --input clip.mp4 --particles 12000
-python fluxcam.py --no-hands        # skip MediaPipe (lighter, optical flow only)
-python fluxcam.py --selftest        # headless: render synthetic frames to PNGs (no camera/GUI)
+python fluxcam.py --no-hands          # skip MediaPipe (lighter, optical flow only)
+python fluxcam.py --selftest          # headless: render synthetic frames to PNGs (no camera/GUI)
 ```
 
 > **macOS:** the first run will ask for camera permission for your terminal app. Allow it, then
@@ -74,19 +84,19 @@ python fluxcam.py --selftest        # headless: render synthetic frames to PNGs 
 
 | Key | Action | Key | Action |
 |---|---|---|---|
-| `m` | cycle mode | `[` `]` | fewer / more particles |
-| `c` | particle colour (direction / camera / ember) | `-` `=` | shorter / longer trails |
-| `x` | toggle faint camera "ghost" | `f` | mirror |
-| `g` | toggle hand control | `r` | clear the trail |
-| `e` | clear the echoes | `s` | save a PNG |
+| `m` | cycle mode | `n` | next face filter (photo mode) |
+| `c` | particle colour (direction / camera / ember) | `[` `]` | fewer / more particles |
+| `x` | toggle faint camera "ghost" | `-` `=` | shorter / longer trails |
+| `g` | toggle MediaPipe tracking | `f` | mirror |
+| `r` | clear the trail | `s` | save a PNG |
 | `space` | pause | `h` | toggle help · `q`/`Esc` quit |
 
-**Hand gestures** (when hand control is on): **pinch** thumb to index to *freeze a translucent
-echo* of yourself onto the scene — pinch again in a new pose and the ghosts stack into a live
-multi-exposure (a counter shows how many echoes). **Hold an open palm** for ~0.7 s to wipe them
-all and start over (or press `e`). The echoes blend with proper alpha, so they stay translucent
-and never wash the image out — even against a bright wall. In the art modes, pinch also grabs and
-flings the particles and an open palm pushes them.
+**Face filters** (photo mode): the AR prop follows your face automatically — tilt your head and the
+sunglasses tilt with you, lean in and they scale up. Press **`n`** to cycle through sunglasses,
+mustache, dog ears, crown, clown nose, and *none*. Press **`s`** to save a clean PNG with the
+filter baked in. **Hand gestures** (art modes): **pinch** thumb to index to grab and *fling* the
+particles in the direction you sweep; **hold an open palm** to push them away. A green ring means
+grab, blue means push.
 
 ## Design notes & honest trade-offs
 
@@ -120,3 +130,4 @@ Built after studying common OpenCV optical-flow and webcam creative-coding patte
 - [daisukelab/cv_opt_flow](https://github.com/daisukelab/cv_opt_flow) (dense-flow HSV showcase)
 - [RomalaMishra/Air_Canvas](https://github.com/RomalaMishra/Air_Canvas) (webcam interactive-art pattern)
 - [MediaPipe Hand Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/hand_landmarker) (21-point hand tracking)
+- [MediaPipe Face Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker) (468-point face mesh, used for the AR filters)

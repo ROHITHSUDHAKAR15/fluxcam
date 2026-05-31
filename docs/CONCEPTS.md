@@ -1,9 +1,15 @@
 # Concepts — how FluxCam actually works
 
-FluxCam turns webcam motion into glowing, hand-controllable particle art. There is no machine
-learning in the visuals and nothing is pre-recorded: every frame is computed from the two most
-recent camera frames plus (optionally) your hands. This doc explains each idea, why it was
-chosen, and where it lives in the code.
+FluxCam has two halves that share one webcam pipeline:
+
+* **photo mode (default)** — a clean camera with a **Snapchat-style AR face filter** tracked by
+  MediaPipe's 468-point face mesh (section 6 below).
+* **art modes (`m`)** — your motion turned into glowing particle art, driven by dense optical
+  flow, with MediaPipe **hand** tracking to grab and push the particles (sections 1–5, 7).
+
+Nothing is pre-recorded: every frame is computed from the two most recent camera frames plus
+(optionally) MediaPipe's face/hand landmarks. This doc explains each idea, why it was chosen, and
+where it lives in the code.
 
 The whole pipeline:
 
@@ -170,7 +176,52 @@ next splat, giving the diffusing-dye effect.
 
 ---
 
-## 6. Hand control — reaching into the field
+## 6. AR face filters — the photo-mode headline
+
+**The idea.** In photo mode the camera stays clean and sharp, and we lock a Snapchat-style prop
+onto the face — sunglasses, a mustache, dog ears, a crown, a clown nose. `n` cycles them.
+
+**Tracking** (`FaceTracker`). We use MediaPipe's **FaceLandmarker** (the Tasks API), which returns
+**468 face landmarks** per face in normalized `[0,1]` image coordinates. The model is a small
+bundled `.task` file; inference runs on CPU in VIDEO mode (temporal tracking, so each call needs a
+monotonically increasing timestamp — exactly like the hand tracker).
+
+**A face frame, not a per-landmark hack.** Drawing a prop "at landmark 5" would ignore head tilt
+and distance. Instead we derive a tiny coordinate frame from two stable landmarks (the outer eye
+corners, 33 and 263) and express every prop in it (`_face_frame`):
+
+```python
+eL, eR = landmark[33], landmark[263]      # outer eye corners, in pixels
+centre = (eL + eR) / 2                     # midpoint between the eyes
+scale  = ‖eR − eL‖                         # eye-corner distance = a natural unit
+angle  = atan2((eR − eL).y, (eR − eL).x)   # head roll
+ux = (cos angle, sin angle)                # unit vector along the eye line
+uy = (−sin angle, cos angle)               # unit vector down the face
+```
+
+Every prop is then placed as `anchor + (a·ux + b·uy)·scale` for some landmark anchor and offsets
+`a, b` *in eye-distance units*. Because the offsets are scaled by `scale` and rotated by `angle`,
+the props **automatically follow head tilt and distance** — lean in and the sunglasses grow; tilt
+your head and they tilt with you. Ellipse props are drawn with `angle` as their rotation so they
+bank correctly too.
+
+**Props are pure OpenCV, no assets.** Each filter is a handful of `cv2.ellipse` / `cv2.fillPoly`
+calls (`_glasses`, `_mustache`, `_dog`, `_crown`, `_clown`). There are **no PNG/sprite files** to
+ship, load, or alpha-composite — the repo stays tiny and there's nothing to download. Trade-off:
+the look is geometric/cartoonish rather than photoreal, which suits the playful intent.
+
+**Anchors per prop.** Sunglasses sit on the two eye centres (averaged from a ring of eye
+landmarks); the mustache hangs off the philtrum (164); dog ears rise above the forehead (10), the
+nose sits on the nose tip (1); the crown is a zig-zag polygon above the forehead; the clown's
+translucent cheeks blend over landmarks 50/280 with a red nose on the tip.
+
+**Graceful degradation.** Same discipline as hands: if MediaPipe or the face model is missing,
+`FaceTracker` construction is caught and photo mode simply shows the clean camera with no prop.
+`--no-hands` disables all MediaPipe; `g` toggles tracking live.
+
+---
+
+## 7. Hand control — reaching into the field
 
 **The idea.** Let the user *touch* the particles. Track the hands, read two simple gestures, and
 turn them into forces on the particle field.
@@ -229,7 +280,7 @@ purpose, and `g` toggles it live.
 
 ---
 
-## 7. Performance summary
+## 8. Performance summary
 
 | Stage | Cost driver | Mitigation |
 |---|---|---|
@@ -245,10 +296,13 @@ particles live in the small flow-space and are only scaled up when splatted.
 
 ---
 
-## 8. Where to look in the code
+## 9. Where to look in the code
 
 | Concept | Code |
 |---|---|
+| Face tracking | `class FaceTracker` |
+| Face frame (centre/scale/roll) | `_face_frame` |
+| AR filter props | `draw_filter`, `_glasses`, `_mustache`, `_dog`, `_crown`, `_clown` |
 | Optical flow | `Engine.step` → `cv2.calcOpticalFlowFarneback` |
 | Particle advection & lifecycle | `class Particles` (`update`, `resize`) |
 | Colour-by-direction | `colors_for` |
