@@ -48,7 +48,8 @@ webcam ─► resize 320px ─► Farneback flow ─┬─► advect particles �
 
 | Mode | What you see |
 |---|---|
-| **particles** | Glowing particles swept by your motion, trailing light. The signature look. |
+| **photo** *(default)* | A clean, clear live camera. **Pinch** to freeze a translucent echo of yourself; pinch again to stack more into a live multi-exposure. No particles, no clutter. |
+| **particles** | Glowing particles swept by your motion, trailing light. The signature art look. |
 | **flow** | The raw motion field as colour — direction → hue, speed → brightness. Your movement *is* the rainbow. |
 | **ink** | Like particles, but the trail is blurred each frame so colour bleeds and diffuses like dye in water. |
 
@@ -58,11 +59,12 @@ webcam ─► resize 320px ─► Farneback flow ─┬─► advect particles �
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-python fluxcam.py                 # webcam, particle mode + hand control — move around!
-python fluxcam.py --mode flow     # start in dense-flow rainbow mode
+python fluxcam.py                   # clean camera — pinch to stack translucent echoes
+python fluxcam.py --mode particles  # the glowing motion-particle art
+python fluxcam.py --mode flow       # dense-flow rainbow mode
 python fluxcam.py --input clip.mp4 --particles 12000
-python fluxcam.py --no-hands      # skip MediaPipe (lighter, optical flow only)
-python fluxcam.py --selftest      # headless: render synthetic motion to PNGs (no camera/GUI)
+python fluxcam.py --no-hands        # skip MediaPipe (lighter, optical flow only)
+python fluxcam.py --selftest        # headless: render synthetic frames to PNGs (no camera/GUI)
 ```
 
 > **macOS:** the first run will ask for camera permission for your terminal app. Allow it, then
@@ -81,9 +83,10 @@ python fluxcam.py --selftest      # headless: render synthetic motion to PNGs (n
 
 **Hand gestures** (when hand control is on): **pinch** thumb to index to *freeze a translucent
 echo* of yourself onto the scene — pinch again in a new pose and the ghosts stack into a live
-multi-exposure (a green ring marks the pinch, a counter shows how many echoes; `e` clears them).
-Pinching also grabs and flings nearby particles, and an **open palm** pushes them away (blue ring).
-A relaxed/closed hand does nothing, so the gestures stay intentional.
+multi-exposure (a counter shows how many echoes). **Hold an open palm** for ~0.7 s to wipe them
+all and start over (or press `e`). The echoes blend with proper alpha, so they stay translucent
+and never wash the image out — even against a bright wall. In the art modes, pinch also grabs and
+flings the particles and an open palm pushes them.
 
 ## Design notes & honest trade-offs
 

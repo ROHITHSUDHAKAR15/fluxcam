@@ -15,23 +15,27 @@ Why it looks alive (the three ideas doing the work):
   3. A fading trail buffer (each frame dimmed, new splats added) gives the glowing,
      long-exposure look instead of flickering dots.
 
-Reach in and touch it: with MediaPipe hand tracking (on by default), pinch your fingers to
-freeze a *translucent echo* of yourself onto the scene — pinch again in a new pose and the
-ghosts stack into a multi-exposure. An open palm pushes the particles away.
+Two things in one window:
+  * photo mode (default): a clean live camera. Pinch your fingers to freeze a *translucent
+    echo* of yourself onto the scene; pinch again in a new pose and the ghosts stack into a
+    live multi-exposure. Hold an open palm (or press e) to wipe them and start over.
+  * particles / flow / ink modes (press m): your motion painted as glowing particles.
 
-All vectorized in NumPy + OpenCV — no per-particle Python loop — so it runs in real time.
+Hand tracking is MediaPipe (on by default). Everything else is vectorized NumPy + OpenCV —
+no per-particle Python loop — so it runs in real time on a laptop CPU.
 
 Run it:
-    python fluxcam.py                 # webcam, particle mode (+ hand control)
-    python fluxcam.py --mode flow     # start in dense-flow rainbow mode
+    python fluxcam.py                 # clean camera, pinch to stack translucent echoes
+    python fluxcam.py --mode particles  # the glowing motion-particle art
+    python fluxcam.py --mode flow     # dense-flow rainbow mode
     python fluxcam.py --input clip.mp4
     python fluxcam.py --no-hands      # disable hand tracking
-    python fluxcam.py --selftest      # headless: render synthetic motion to PNGs
+    python fluxcam.py --selftest      # headless: render synthetic frames to PNGs
 
 Keys (window focused):
     q/Esc quit   space pause   m mode   c particle colour   x camera ghost
     [ ] fewer/more particles   - = shorter/longer trails    f mirror
-    g hand control   e clear echoes   r reset   s save PNG   h help
+    g hand control   e reset echoes   r clear trail   s save PNG   h help
 """
 from __future__ import annotations
 
@@ -45,7 +49,7 @@ from datetime import datetime
 import cv2
 import numpy as np
 
-MODES = ["particles", "flow", "ink"]
+MODES = ["photo", "particles", "flow", "ink"]
 PARTICLE_COLORS = ["direction", "camera", "ember"]
 
 DEFAULT_HAND_MODEL = os.path.join(
@@ -310,6 +314,10 @@ class Engine:
              hands: list[dict] | None = None) -> np.ndarray:
         fh, fw = frame_bgr.shape[:2]
         self._ensure(fh, fw)
+        # photo mode: a clean, clear camera image — no flow, no particles. The pinch-stamped
+        # translucent echoes are composited on top by the caller (run_live).
+        if MODES[self.cfg.mode] == "photo":
+            return cv2.resize(frame_bgr, self.out_size, interpolation=cv2.INTER_LINEAR)
         small = cv2.resize(frame_bgr, (self.flow_w, self.flow_h), interpolation=cv2.INTER_AREA)
         gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
         if self.prev_gray is None:
@@ -347,13 +355,16 @@ class Engine:
 # UI
 # --------------------------------------------------------------------------------------
 def overlay(img, cfg: Cfg, fps: float):
-    s = f"{MODES[cfg.mode]} | {PARTICLE_COLORS[cfg.pcolor]} | {cfg.n} particles | trail {cfg.decay:.2f} | {fps:4.1f} fps"
+    if MODES[cfg.mode] == "photo":
+        s = f"photo (clean) | pinch to add an echo | {fps:4.1f} fps"
+    else:
+        s = f"{MODES[cfg.mode]} | {PARTICLE_COLORS[cfg.pcolor]} | {cfg.n} particles | trail {cfg.decay:.2f} | {fps:4.1f} fps"
     cv2.putText(img, s, (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4, cv2.LINE_AA)
     cv2.putText(img, s, (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
     if cfg.show_help:
-        lines = ["m mode  c colour  x ghost  f mirror  g hands  space pause",
-                 "[ ] particles   - = trails   r reset   s save   e clear echoes   q quit",
-                 "hands: pinch = freeze a translucent echo of you · open palm = push particles"]
+        lines = ["m mode   x ghost   f mirror   g hands   space pause",
+                 "e/palm = reset echoes    r clear trail    s save photo    q quit",
+                 "pinch = add a translucent echo of you   open palm = push particles"]
         for i, line in enumerate(lines):
             y = img.shape[0] - 16 - (len(lines) - 1 - i) * 22
             cv2.putText(img, line, (12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 0, 0), 4, cv2.LINE_AA)
@@ -403,9 +414,9 @@ def save_png(img) -> str:
 # pinches stack into a multi-exposure of frozen translucent selves without blowing out.
 # --------------------------------------------------------------------------------------
 class EchoLayer:
-    def __init__(self, out_w: int, out_h: int, fade: float = 0.90):
+    def __init__(self, out_w: int, out_h: int, fade: float = 0.97):
         self.out_size = (out_w, out_h)
-        self.fade = fade
+        self.fade = fade                       # ~1.0 keeps many echoes; lower = older fade faster
         self.buf: np.ndarray | None = None     # float32 accumulator, or None if empty
         self.count = 0
 
@@ -417,11 +428,13 @@ class EchoLayer:
     def clear(self):
         self.buf, self.count = None, 0
 
-    def overlay(self, img: np.ndarray, alpha: float = 0.55) -> np.ndarray:
+    def overlay(self, img: np.ndarray, alpha: float = 0.5) -> np.ndarray:
+        # alpha-blend (not additive) so the ghosts stay translucent and never wash the
+        # image out to white, even against a bright wall.
         if self.buf is None:
             return img
         ghost = np.clip(self.buf, 0, 255).astype(np.uint8)
-        return cv2.addWeighted(img, 1.0, ghost, alpha, 0)
+        return cv2.addWeighted(img, 1.0 - alpha, ghost, alpha, 0)
 
 
 # --------------------------------------------------------------------------------------
@@ -439,8 +452,8 @@ def run_live(src: str, cfg: Cfg, out_w: int, out_h: int, hand_model: str) -> int
     if cfg.hands:
         try:
             tracker = HandTracker(hand_model)
-            print("hand control ON — pinch = freeze a translucent echo of you,"
-                  " open palm = push, e = clear echoes (g toggles).")
+            print("hand control ON: pinch = add a translucent echo of you,"
+                  " hold open palm = wipe echoes, e = reset (g toggles).")
         except Exception as e:                       # missing mediapipe or model file
             print(f"hand control unavailable ({type(e).__name__}: {e}); running without it.",
                   file=sys.stderr)
@@ -448,12 +461,12 @@ def run_live(src: str, cfg: Cfg, out_w: int, out_h: int, hand_model: str) -> int
 
     eng = Engine(cfg, out_w, out_h)
     echoes = EchoLayer(out_w, out_h)
-    win = "FluxCam — paint with motion (h = help)"
+    win = "FluxCam - paint with motion (h = help)"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     last, hands = None, []
     fps, t = 0.0, time.time()
-    prev_pinch, flash_until = False, 0.0
-    print("FluxCam running — move around! Focus the window, press h for keys, q to quit.")
+    prev_pinch, flash_until, palm_held = False, 0.0, 0.0
+    print("FluxCam running - move around! Focus the window, press h for keys, q to quit.")
     while True:
         if not cfg.paused:
             ok, frame = cap.read()
@@ -466,8 +479,9 @@ def run_live(src: str, cfg: Cfg, out_w: int, out_h: int, hand_model: str) -> int
                 frame = cv2.flip(frame, 1)
             hands = tracker.process(frame) if (tracker is not None and cfg.hands) else []
             now = time.time()
-            last = eng.step(frame, dt=max(1e-3, now - t), hands=hands)
-            inst = 1.0 / max(1e-6, now - t)
+            dt = max(1e-3, now - t)
+            last = eng.step(frame, dt=dt, hands=hands)
+            inst = 1.0 / dt
             fps = 0.9 * fps + 0.1 * inst if fps else inst
             t = now
             # stamp a translucent echo on the rising edge of each pinch (one per pinch)
@@ -476,6 +490,14 @@ def run_live(src: str, cfg: Cfg, out_w: int, out_h: int, hand_model: str) -> int
                 echoes.stamp(frame)
                 flash_until = now + 0.18
             prev_pinch = pinch
+            # hold an open palm for ~0.7s to wipe all echoes (a gesture reset)
+            if any(h["act"] == "push" for h in hands):
+                palm_held += dt
+                if palm_held >= 0.7 and echoes.count:
+                    echoes.clear()
+                    flash_until = now + 0.12
+            else:
+                palm_held = 0.0
         if last is not None:
             shown = echoes.overlay(last.copy())
             if cfg.hands:
@@ -531,9 +553,9 @@ def run_selftest(cfg: Cfg, out_w: int, out_h: int) -> int:
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(description="FluxCam — webcam motion painted as glowing particles.")
+    p = argparse.ArgumentParser(description="FluxCam - webcam echoes + motion-painted particles.")
     p.add_argument("--input", default="0", help="camera index (default 0) or video file")
-    p.add_argument("--mode", choices=MODES, default="particles")
+    p.add_argument("--mode", choices=MODES, default="photo")
     p.add_argument("--particles", type=int, default=6000)
     p.add_argument("--width", type=int, default=960, help="output window width")
     p.add_argument("--height", type=int, default=540, help="output window height")
