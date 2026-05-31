@@ -54,7 +54,12 @@ import numpy as np
 
 MODES = ["photo", "particles", "flow", "ink"]
 PARTICLE_COLORS = ["direction", "camera", "ember"]
-FILTERS = ["none", "sunglasses", "mustache", "dog", "crown", "clown"]
+# Static props track the face; interactive ones react to your expression (see CUES).
+FILTERS = ["none", "sunglasses", "mustache", "dog", "crown", "clown",
+           "fire", "bubbles", "hearts", "lasers"]
+STATIC_FILTERS = {"sunglasses", "mustache", "dog", "crown", "clown"}
+CUES = {"fire": "open your mouth!", "bubbles": "open your mouth!",
+        "hearts": "smile :)", "lasers": "raise your eyebrows!"}
 
 _MODELS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 DEFAULT_HAND_MODEL = os.path.join(_MODELS, "hand_landmarker.task")
@@ -222,10 +227,11 @@ class FaceTracker:
         ts = max(self._last_ts + 1, int((time.time() - self.t0) * 1000))   # must increase
         self._last_ts = ts
         res = self.landmarker.detect_for_video(image, ts)
+        H, W = frame_bgr.shape[:2]
         faces = []
         for lms in res.face_landmarks:
             lm = np.array([[p.x, p.y] for p in lms], np.float32)            # (468, 2) norm
-            faces.append({"lm": lm})
+            faces.append({"lm": lm, "expr": face_expression(lm, W, H)})
         return faces
 
     def close(self):
@@ -246,6 +252,24 @@ L_EYE_RING = [33, 133, 159, 145]               # points around the left-image ey
 R_EYE_RING = [362, 263, 386, 374]              # points around the right-image eye
 NOSE_TIP, PHILTRUM, LOWER_LIP = 1, 164, 14
 FOREHEAD, L_CHEEK, R_CHEEK = 10, 50, 280
+UPPER_LIP_IN, MOUTH_L, MOUTH_R = 13, 61, 291   # inner top lip + mouth corners
+L_EYE_TOP, R_EYE_TOP = 159, 386                # upper eyelid centres
+L_BROW, R_BROW = 105, 334                       # eyebrow centres
+
+
+def face_expression(lm: np.ndarray, W: int, H: int) -> dict:
+    """Read a few continuous (0..1) expression signals from the landmarks, in pixel space
+    so x/y aspect ratio is correct. These drive the interactive filters."""
+    P = lm * np.array([W, H], np.float32)
+    scale = float(np.linalg.norm(P[L_EYE_OUT] - P[R_EYE_OUT])) + 1e-6
+
+    def d(a, b):
+        return float(np.linalg.norm(P[a] - P[b])) / scale
+
+    jaw = np.clip((d(UPPER_LIP_IN, LOWER_LIP) - 0.05) / 0.30, 0, 1)        # mouth open
+    smile = np.clip((d(MOUTH_L, MOUTH_R) - 0.78) / 0.30, 0, 1)            # mouth widen
+    brow = np.clip(((d(L_EYE_TOP, L_BROW) + d(R_EYE_TOP, R_BROW)) / 2 - 0.10) / 0.10, 0, 1)
+    return {"jaw": float(jaw), "smile": float(smile), "brow": float(brow)}
 
 
 def _px(lm: np.ndarray, idx, W: int, H: int) -> np.ndarray:
@@ -360,6 +384,230 @@ def draw_filter(img: np.ndarray, faces: list[dict], fi: int):
             _crown(img, lm, W, H, scale, ux, uy)
         elif name == "clown":
             _clown(img, lm, W, H, scale)
+
+
+# --------------------------------------------------------------------------------------
+# Interactive filters — they react to your expression (mouth open, smile, brows) read in
+# face_expression(). A tiny fixed-capacity particle pool drives fire / bubbles / hearts;
+# lasers are drawn directly. FaceFX.update() advances the animation, FaceFX.draw() renders
+# it, so a frame can be re-drawn (e.g. for a saved PNG) without double-stepping the sim.
+# --------------------------------------------------------------------------------------
+class Emitter:
+    def __init__(self, cap: int):
+        self.pos = np.zeros((cap, 2), np.float32)
+        self.vel = np.zeros((cap, 2), np.float32)
+        self.age = np.full(cap, 1e9, np.float32)     # >= life means a free slot
+        self.life = np.ones(cap, np.float32)
+        self.size = np.zeros(cap, np.float32)
+        self.col = np.zeros((cap, 3), np.float32)
+
+    def spawn(self, pos, vel, life, size, col):
+        n = len(pos)
+        dead = np.where(self.age >= self.life)[0]
+        if n == 0 or dead.size == 0:
+            return
+        idx = dead[:n]
+        k = idx.size
+        self.pos[idx], self.vel[idx] = pos[:k], vel[:k]
+        self.age[idx], self.life[idx] = 0.0, life[:k]
+        self.size[idx], self.col[idx] = size[:k], col[:k]
+
+    def update(self, dt, accel):
+        a = self.age < self.life
+        self.age += dt
+        self.vel[a] += np.asarray(accel, np.float32) * dt
+        self.pos[a] += self.vel[a] * dt
+
+    @property
+    def alive(self):
+        return self.age < self.life
+
+
+def _lerp(a, b, t):
+    return tuple(float(a[i] + (b[i] - a[i]) * t) for i in range(3))
+
+
+def _fire_color(t: float):
+    if t < 0.3:
+        c = _lerp((255, 255, 255), (0, 230, 255), t / 0.3)       # white -> yellow
+    elif t < 0.7:
+        c = _lerp((0, 230, 255), (0, 60, 255), (t - 0.3) / 0.4)  # yellow -> red
+    else:
+        c = _lerp((0, 60, 255), (0, 0, 80), (t - 0.7) / 0.3)     # red -> ember
+    f = 1.0 - 0.3 * t
+    return tuple(v * f for v in c)
+
+
+def _draw_heart(img, c, s, col):
+    x, y = float(c[0]), float(c[1])
+    r = s * 0.5
+    cv2.circle(img, (int(x - r * 0.5), int(y - r * 0.2)), max(1, int(r * 0.55)), col, -1, cv2.LINE_AA)
+    cv2.circle(img, (int(x + r * 0.5), int(y - r * 0.2)), max(1, int(r * 0.55)), col, -1, cv2.LINE_AA)
+    pts = np.array([[x - r, y - r * 0.05], [x + r, y - r * 0.05], [x, y + r * 1.1]], np.int32)
+    cv2.fillPoly(img, [pts], col, cv2.LINE_AA)
+
+
+class FaceFX:
+    def __init__(self, out_w: int, out_h: int, seed: int = 11):
+        self.W, self.H = out_w, out_h
+        self.rng = np.random.default_rng(seed)
+        self.fire = Emitter(700)
+        self.bub = Emitter(300)
+        self.heart = Emitter(220)
+
+    # -- per-frame animation step (call once per captured frame) ---------------------
+    def update(self, faces, fi: int, dt: float):
+        name = FILTERS[fi]
+        if name == "fire":
+            self._emit_fire(faces)
+        elif name == "bubbles":
+            self._emit_bubbles(faces)
+        elif name == "hearts":
+            self._emit_hearts(faces)
+        self.fire.update(dt, (0.0, 180.0))      # fire drifts down/out, then falls
+        self.bub.update(dt, (0.0, -40.0))       # bubbles rise
+        self.heart.update(dt, (0.0, -60.0))     # hearts float up
+
+    def _emit_fire(self, faces):
+        for f in faces:
+            amt = f["expr"]["jaw"]
+            if amt < 0.12:
+                continue
+            _, scale, _, ux, uy = _face_frame(f["lm"], self.W, self.H)
+            mouth = _px(f["lm"], [UPPER_LIP_IN, LOWER_LIP], self.W, self.H)
+            n = int(3 + amt * 22)
+            spread = self.rng.uniform(-0.55, 0.55, n)[:, None]
+            dirs = uy[None, :] + ux[None, :] * spread
+            dirs /= np.linalg.norm(dirs, axis=1, keepdims=True) + 1e-6
+            speed = (scale * self.rng.uniform(3.0, 7.0, n) * (0.4 + amt))[:, None]
+            pos = mouth[None, :] + (ux[None, :] * self.rng.uniform(-0.15, 0.15, n)[:, None]) * scale
+            life = self.rng.uniform(0.35, 0.7, n).astype(np.float32)
+            size = (scale * self.rng.uniform(0.05, 0.12, n)).astype(np.float32)
+            col = np.zeros((n, 3), np.float32)
+            self.fire.spawn(pos.astype(np.float32), (dirs * speed).astype(np.float32), life, size, col)
+
+    def _emit_bubbles(self, faces):
+        for f in faces:
+            amt = f["expr"]["jaw"]
+            if amt < 0.15 or self.rng.random() > amt * 0.7:
+                continue
+            _, scale, _, ux, uy = _face_frame(f["lm"], self.W, self.H)
+            mouth = _px(f["lm"], [UPPER_LIP_IN, LOWER_LIP], self.W, self.H)
+            n = int(self.rng.integers(1, 3))
+            vel = (-uy[None, :] * (scale * self.rng.uniform(1.4, 3.0, n)[:, None])
+                   + ux[None, :] * (scale * self.rng.uniform(-1.0, 1.0, n)[:, None]))
+            pos = mouth[None, :] + (ux[None, :] * self.rng.uniform(-0.2, 0.2, n)[:, None]) * scale
+            life = self.rng.uniform(1.4, 2.6, n).astype(np.float32)
+            size = (scale * self.rng.uniform(0.08, 0.22, n)).astype(np.float32)
+            col = np.zeros((n, 3), np.float32)
+            self.bub.spawn(pos.astype(np.float32), vel.astype(np.float32), life, size, col)
+
+    def _emit_hearts(self, faces):
+        for f in faces:
+            amt = f["expr"]["smile"]
+            if amt < 0.3 or self.rng.random() > amt * 0.5:
+                continue
+            _, scale, _, ux, uy = _face_frame(f["lm"], self.W, self.H)
+            origin = _px(f["lm"], [MOUTH_L, MOUTH_R], self.W, self.H)
+            n = int(self.rng.integers(1, 3))
+            vel = (-uy[None, :] * (scale * self.rng.uniform(1.5, 3.0, n)[:, None])
+                   + ux[None, :] * (scale * self.rng.uniform(-1.2, 1.2, n)[:, None]))
+            pos = origin[None, :] + (ux[None, :] * self.rng.uniform(-1.0, 1.0, n)[:, None]) * scale * 0.5
+            life = self.rng.uniform(1.2, 2.2, n).astype(np.float32)
+            size = (scale * self.rng.uniform(0.18, 0.32, n)).astype(np.float32)
+            col = np.zeros((n, 3), np.float32)
+            self.heart.spawn(pos.astype(np.float32), vel.astype(np.float32), life, size, col)
+
+    # -- render the current state -----------------------------------------------------
+    def draw(self, img, faces, fi: int):
+        name = FILTERS[fi]
+        if name == "none":
+            return
+        if name in STATIC_FILTERS:
+            draw_filter(img, faces, fi)
+        elif name == "fire":
+            self._draw_fire(img)
+        elif name == "bubbles":
+            self._draw_bubbles(img)
+        elif name == "hearts":
+            self._draw_hearts(img, faces)
+        elif name == "lasers":
+            self._draw_lasers(img, faces)
+
+    def _draw_fire(self, img):
+        a = self.fire.alive
+        if not a.any():
+            return
+        ov = np.zeros_like(img)
+        pos, size = self.fire.pos[a], self.fire.size[a]
+        t = (self.fire.age[a] / self.fire.life[a]).clip(0, 1)
+        for i in range(len(pos)):
+            cv2.circle(ov, (int(pos[i, 0]), int(pos[i, 1])), max(1, int(size[i])),
+                       _fire_color(float(t[i])), -1, cv2.LINE_AA)
+        ov = cv2.GaussianBlur(ov, (0, 0), 4)
+        cv2.add(img, ov, img)
+
+    def _draw_bubbles(self, img):
+        a = self.bub.alive
+        if not a.any():
+            return
+        ov = img.copy()
+        pos, size = self.bub.pos[a], self.bub.size[a]
+        for i in range(len(pos)):
+            p = (int(pos[i, 0]), int(pos[i, 1]))
+            r = max(2, int(size[i]))
+            cv2.circle(ov, p, r, (255, 230, 200), 2, cv2.LINE_AA)
+            cv2.circle(ov, (int(p[0] - r * 0.3), int(p[1] - r * 0.3)), max(1, int(r * 0.25)),
+                       (255, 255, 255), -1, cv2.LINE_AA)
+        cv2.addWeighted(ov, 0.55, img, 0.45, 0, img)
+
+    def _draw_hearts(self, img, faces):
+        ov = img.copy()
+        a = self.heart.alive
+        pos, size = self.heart.pos[a], self.heart.size[a]
+        for i in range(len(pos)):
+            _draw_heart(ov, pos[i], float(size[i]), (120, 120, 255))
+        for f in faces:                               # heart-eyes while smiling
+            if f["expr"]["smile"] > 0.4:
+                _, scale, _, _, _ = _face_frame(f["lm"], self.W, self.H)
+                for ring in (L_EYE_RING, R_EYE_RING):
+                    _draw_heart(ov, _px(f["lm"], ring, self.W, self.H), scale * 0.55, (120, 120, 255))
+        cv2.addWeighted(ov, 0.85, img, 0.15, 0, img)
+
+    def _draw_lasers(self, img, faces):
+        if not faces:
+            return
+        ov = np.zeros_like(img)
+        for f in faces:
+            inten = 0.3 + 0.7 * f["expr"]["brow"]
+            _, scale, _, ux, uy = _face_frame(f["lm"], self.W, self.H)
+            mid = _px(f["lm"], [L_EYE_OUT, R_EYE_OUT], self.W, self.H)
+            reach = max(self.W, self.H) * 1.2
+            for ring in (L_EYE_RING, R_EYE_RING):
+                e = _px(f["lm"], ring, self.W, self.H)
+                out = e - mid
+                out /= np.linalg.norm(out) + 1e-6
+                d = out * 0.6 + uy * 0.5
+                d /= np.linalg.norm(d) + 1e-6
+                end = (e + d * reach).astype(int)
+                cv2.line(ov, tuple(e.astype(int)), tuple(end), (0, 0, 255),
+                         max(2, int(scale * 0.18 * inten)), cv2.LINE_AA)
+        ov = cv2.GaussianBlur(ov, (0, 0), 5)
+        cv2.add(img, ov, img)
+        for f in faces:                               # bright white core on top
+            inten = 0.3 + 0.7 * f["expr"]["brow"]
+            _, scale, _, ux, uy = _face_frame(f["lm"], self.W, self.H)
+            mid = _px(f["lm"], [L_EYE_OUT, R_EYE_OUT], self.W, self.H)
+            reach = max(self.W, self.H) * 1.2
+            for ring in (L_EYE_RING, R_EYE_RING):
+                e = _px(f["lm"], ring, self.W, self.H)
+                out = e - mid
+                out /= np.linalg.norm(out) + 1e-6
+                d = out * 0.6 + uy * 0.5
+                d /= np.linalg.norm(d) + 1e-6
+                end = (e + d * reach).astype(int)
+                cv2.line(img, tuple(e.astype(int)), tuple(end), (255, 255, 255),
+                         max(1, int(scale * 0.06 * inten)), cv2.LINE_AA)
 
 
 # --------------------------------------------------------------------------------------
@@ -531,7 +779,9 @@ class Engine:
 # --------------------------------------------------------------------------------------
 def overlay(img, cfg: Cfg, fps: float):
     if MODES[cfg.mode] == "photo":
-        s = f"photo | filter: {FILTERS[cfg.filter]} (n = next) | {fps:4.1f} fps"
+        cue = CUES.get(FILTERS[cfg.filter])
+        tag = f" -> {cue}" if cue else ""
+        s = f"photo | filter: {FILTERS[cfg.filter]}{tag} (n = next) | {fps:4.1f} fps"
     else:
         s = f"{MODES[cfg.mode]} | {PARTICLE_COLORS[cfg.pcolor]} | {cfg.n} particles | trail {cfg.decay:.2f} | {fps:4.1f} fps"
     cv2.putText(img, s, (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4, cv2.LINE_AA)
@@ -615,6 +865,7 @@ def run_live(src: str, cfg: Cfg, out_w: int, out_h: int, hand_model: str, face_m
                   " art modes = pinch to grab / open palm to push (g toggles).")
 
     eng = Engine(cfg, out_w, out_h)
+    fx = FaceFX(out_w, out_h)
     win = "FluxCam - AR face filters + motion art (h = help)"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     last, hands, faces = None, [], []
@@ -639,13 +890,15 @@ def run_live(src: str, cfg: Cfg, out_w: int, out_h: int, hand_model: str, face_m
             now = time.time()
             dt = max(1e-3, now - t)
             last = eng.step(frame, dt=dt, hands=hands)
+            if MODES[cfg.mode] == "photo":
+                fx.update(faces, cfg.filter, dt)
             inst = 1.0 / dt
             fps = 0.9 * fps + 0.1 * inst if fps else inst
             t = now
         if last is not None:
             shown = last.copy()
             if MODES[cfg.mode] == "photo":
-                draw_filter(shown, faces, cfg.filter)
+                fx.draw(shown, faces, cfg.filter)
             elif cfg.hands:
                 draw_hands(shown, hands)
             overlay(shown, cfg, fps)
@@ -654,7 +907,7 @@ def run_live(src: str, cfg: Cfg, out_w: int, out_h: int, hand_model: str, face_m
         if k == ord("s") and last is not None:
             snap = last.copy()                       # save the clean frame + filter, no HUD
             if MODES[cfg.mode] == "photo":
-                draw_filter(snap, faces, cfg.filter)
+                fx.draw(snap, faces, cfg.filter)
             save_png(snap)
         elif k != 255 and not handle_key(k, cfg, eng):
             break

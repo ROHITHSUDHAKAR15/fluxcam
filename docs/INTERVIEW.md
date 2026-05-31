@@ -11,7 +11,9 @@ goal is that you can explain every line you'd be asked about and defend every de
 > default it's **AR face filters** — I use MediaPipe's 468-point face mesh to lock Snapchat-style
 > props onto your face: sunglasses, dog ears, a crown. They track head tilt and distance because
 > I build a little coordinate frame from the eye landmarks and draw everything relative to it.
-> Press a key and it flips into **generative motion art** — I compute **dense optical flow**
+> Some filters are **interactive** — I read mouth-open, smile, and eyebrow-raise straight off the
+> mesh, so opening your mouth breathes fire, smiling floats hearts, raising your brows fires laser
+> eyes. Press a key and it flips into **generative motion art** — I compute **dense optical flow**
 > between consecutive frames, a per-pixel motion field, and push thousands of particles through
 > it so they stream with your movement and leave glowing trails. I also wired **MediaPipe hand
 > tracking** so you can pinch to grab and fling the particles. The whole thing runs on a laptop
@@ -32,7 +34,11 @@ no special hardware, nothing to download).
    face size."*
 2. **Press `n` a few times** — *"sunglasses, mustache, dog ears, crown, clown nose. Every prop is
    just OpenCV shapes anchored to landmarks — no image assets, nothing to download."*
-3. **Press `m`** to particles — *"now the same webcam drives motion art. Each glowing dot is a
+3. **Keep pressing `n` to an interactive filter** — *"these react to my face. This is `fire` —
+   I read mouth-open off the mesh, so the wider I open, the bigger the flame."* Open your mouth.
+   *"`hearts` does the same off a smile, `lasers` off raised eyebrows — all just geometric ratios
+   on the landmarks, normalized by face size so they work near or far."*
+4. **Press `m`** to particles — *"now the same webcam drives motion art. Each glowing dot is a
    particle carried by the optical-flow field; colour is the direction it's travelling."* Wave.
 4. **Pinch** — *"MediaPipe also gives me 21 hand landmarks; thumb-to-index close = grab, and I add
    my hand's velocity so I can fling them."* (Green ring.) **Open palm** — *"open hand pushes."*
@@ -69,6 +75,7 @@ direct manipulation.
 |---|---|---|
 | **Props in a face coordinate frame, not at raw landmarks** | Building a frame from the eye corners (centre/scale/roll) makes every prop track head tilt and distance for free. | A little vector math up front instead of hard-coding pixel offsets. |
 | **AR props as OpenCV shapes, no image assets** | Zero sprite files to ship/load/alpha-composite; the repo stays tiny and there's nothing to download. | The look is geometric/cartoonish, not photoreal. |
+| **Interactive filters from geometric ratios, not an expression classifier** | Mouth-open/smile/brow are three landmark distances normalized by eye-distance — no training, distance-invariant, and the effect scales smoothly with how big the expression is. | Three hand-tuned thresholds; only the expressions I picked, not arbitrary emotion. |
 | **Dense flow, not sparse (Lucas–Kanade)** | I want the *whole* moving field to paint, not a few tracked corners. | More compute than sparse tracking. |
 | **Flow at 320 px, not full resolution** | Flow is the most expensive op; cost scales with pixels. | Slightly softer flow; particles are scaled up to the display to hide it. |
 | **Particles in flow-space, scaled at splat time** | Decouples particle count from flow cost — I can 5× the particles without touching flow. | A little coordinate bookkeeping (`sx`, `sy`). |
@@ -100,6 +107,15 @@ nothing for a user to download. And it avoids per-frame alpha compositing of tra
 which is fiddly to get right under rotation. The cost is that the props look geometric rather than
 photoreal, which fits the playful intent. Swapping in textured PNGs later is a contained change —
 the anchor points and face frame are already computed.
+
+**Q: How do the interactive filters detect mouth-open, smile, and eyebrow-raise?**
+All three come from the same 468-landmark mesh, as geometric ratios in `face_expression()`. Mouth-
+open is the inner-lip gap (landmarks 13↔14); smile is the mouth-corner width (61↔291); eyebrow-
+raise is the eyelid-to-brow gap (averaged left/right). I measure each in pixel space and divide by
+the eye-corner distance, so they're invariant to how near or far the face is. Then I map each
+through a `(value − rest) / range` clip into a 0..1 amount, and that amount drives the effect's
+intensity — a slight smile floats a few hearts, a big grin floats a lot. No classifier, no
+training; just explainable thresholds, the same philosophy as the hand gestures.
 
 **Q: Why two MediaPipe models (face *and* hand) instead of one?**
 They serve the two different halves: FaceLandmarker (468 points) drives the AR filters in photo
@@ -164,7 +180,10 @@ particles actually responded. It needs no webcam or GUI, so it's CI-friendly. I 
 the hand forces directly: assert that "grab" reduces mean particle distance to the hand point,
 "push" increases it, and a sideways fling produces a positive sideways displacement. The AR filters
 I exercised by feeding a synthetic 468-landmark face into `draw_filter` for every filter and
-asserting it draws without error and actually changes pixels — no webcam needed.
+asserting it draws without error and actually changes pixels — no webcam needed. For the
+interactive filters I went further: I synthesized faces with controllable jaw/smile/brow, checked
+`face_expression` returns ~0 at rest and saturates when I exaggerate the pose, then ran `FaceFX`
+for 60 frames per filter and asserted each one emits and renders particles — all without a camera.
 
 **Q: What's the biggest weakness?**
 Optical flow is content-dependent (no texture → no motion signal), and the gesture vocabulary is

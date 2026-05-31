@@ -215,6 +215,33 @@ landmarks); the mustache hangs off the philtrum (164); dog ears rise above the f
 nose sits on the nose tip (1); the crown is a zig-zag polygon above the forehead; the clown's
 translucent cheeks blend over landmarks 50/280 with a red nose on the tip.
 
+**Interactive (expression-driven) filters.** Beyond static props, four filters *react to your
+face*. From the same landmarks we read three continuous signals in `face_expression()`, each
+divided by the eye-corner distance so they're scale-invariant, and computed in **pixel** space so
+the x/y aspect ratio is correct:
+
+```python
+jaw   = ‖inner_top_lip(13) − inner_bottom_lip(14)‖ / scale   # mouth open
+smile = ‖mouth_left(61)    − mouth_right(291)‖     / scale    # mouth widen
+brow  = mean(‖eyelid − eyebrow‖ for both eyes)     / scale    # eyebrow raise
+```
+
+Each is squashed to `0..1` with a calibrated `(value − rest)/range` clip. Those amounts drive a
+tiny fixed-capacity particle pool (`class Emitter`) and a stateful `FaceFX`:
+
+- **fire / bubbles** — while `jaw` is open, spawn particles at the mouth each frame. Fire shoots
+  out along the face's down-axis, ages white→yellow→red, and is drawn as an **additive, blurred
+  overlay** so it glows; bubbles rise, drawn as translucent rings.
+- **hearts** — while you `smile`, spawn hearts that float up (drawn from two circles + a triangle),
+  plus a heart over each eye.
+- **lasers** — beams from each eye along an outward/down direction, thickness and brightness scaled
+  by `brow`, rendered as a blurred red glow with a white core.
+
+`FaceFX` deliberately splits `update()` (advance the sim once per captured frame) from `draw()`
+(render current state), so a frame can be re-drawn — e.g. when you press `s` to save — without
+double-stepping the animation. The on-screen status line shows the cue for the active filter
+("open your mouth!", "smile :)", "raise your eyebrows!").
+
 **Graceful degradation.** Same discipline as hands: if MediaPipe or the face model is missing,
 `FaceTracker` construction is caught and photo mode simply shows the clean camera with no prop.
 `--no-hands` disables all MediaPipe; `g` toggles tracking live.
@@ -303,6 +330,8 @@ particles live in the small flow-space and are only scaled up when splatted.
 | Face tracking | `class FaceTracker` |
 | Face frame (centre/scale/roll) | `_face_frame` |
 | AR filter props | `draw_filter`, `_glasses`, `_mustache`, `_dog`, `_crown`, `_clown` |
+| Expression signals (mouth/smile/brow) | `face_expression` |
+| Interactive filter particles | `class Emitter`, `class FaceFX` (`_draw_fire`, `_draw_bubbles`, `_draw_hearts`, `_draw_lasers`) |
 | Optical flow | `Engine.step` → `cv2.calcOpticalFlowFarneback` |
 | Particle advection & lifecycle | `class Particles` (`update`, `resize`) |
 | Colour-by-direction | `colors_for` |

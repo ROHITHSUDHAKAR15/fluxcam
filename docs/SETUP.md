@@ -88,7 +88,7 @@ particles actually responded to motion and got splatted onto the canvas.
 |---|---|---|
 | `--input` | `0` | Camera index (`0`, `1`, …) or a path to a video file. |
 | `--mode` | `photo` | Start mode: `photo`, `particles`, `flow`, or `ink`. |
-| `--filter` | `sunglasses` | Starting AR face filter: `none`, `sunglasses`, `mustache`, `dog`, `crown`, `clown` (cycle live with `n`). |
+| `--filter` | `sunglasses` | Starting AR face filter (cycle live with `n`). Static props: `sunglasses`, `mustache`, `dog`, `crown`, `clown`. Interactive: `fire`, `bubbles` (open mouth), `hearts` (smile), `lasers` (raise brows). Plus `none`. |
 | `--particles` | `6000` | Particle count (live-tunable with `[` `]`, 500–40000). |
 | `--width` / `--height` | `960` / `540` | Output window size in pixels. |
 | `--no-mirror` | off | Don't horizontally flip the camera (default mirrors, like a selfie). |
